@@ -1,0 +1,106 @@
+import sensor, image, time, math, pyb
+from pyb import UART, LED
+import json
+import ustruct
+
+sensor.reset()
+sensor.set_pixformat(sensor.RGB565)
+sensor.set_framesize(sensor.QQVGA)
+sensor.skip_frames(time=2000)
+sensor.set_auto_gain(False)  # 自动增益，避免光信号被放大
+sensor.set_auto_whitebal(False)  # 自动白平衡，避免自动校正色彩偏差
+
+clock = time.clock()  # 创建一个计时器对象
+
+uart = UART(3, 115200)
+uart.init(115200, bits=8, parity=None, stop=1)
+
+LED(1).on()
+LED(2).on()
+LED(3).on()
+
+black_threshold_01 = (0, 27, -16, -4, -1, 23)
+
+threshold_01 = [
+    (45, 70, -28, -14, 10, 127),
+    (50, 62, -22, -10, 11, 127),
+    (6, 51, 5, 24, -40, -8),
+    (55, 64, -20, -9, -7, 10),
+    (41, 50, -9, 2, 11, 38)
+]
+
+
+exclude_top_rows = 30
+
+def find_max(blobs):  # 定义寻找色块面积最大的函数
+    max_blob = None
+    max_size = 0
+    for blob in blobs:
+        if blob.pixels() > max_size:
+            max_blob = blob
+            max_size = blob.pixels()
+    return max_blob
+
+def process_image_Black(img, black_threshold, uart, roi):
+    blobs = img.find_blobs([black_threshold], roi=roi)  # 捕获黑色区域
+    cx, cy, cw, ch = 0, 0, 0, 0
+
+    Color = 0
+
+    if blobs:  # 判断是否寻找到目标
+        max_b = find_max(blobs)
+        if max_b:  # 确保找到了最大blob
+            cx = max_b.cx()  # 色块中心X坐标
+            cy = max_b.cy()  # 色块中线Y坐标
+            cw = max_b.w()   # 色块宽度
+            ch = max_b.h()   # 色块高度
+
+            img.draw_rectangle(max_b.rect())  # 绘制矩形框
+            img.draw_cross(cx, cy)  # 绘制十字
+            FH = bytearray([0x2C, 0x12, cx, cy, cw, ch, Color, 0x5B])
+            uart.write(FH) #发送数据
+            print(cx, cy, cw, ch)
+
+def process_image_Ball(img, threshold_01, uart):
+    blobs = img.find_blobs(threshold_01, pixels_threshold=200, area_threshold=300, merge=False)
+
+    if blobs:  # 判断是否找到目标
+        max_b = find_max(blobs)
+        if max_b:
+            cx = max_b.cx()  # 色块中心X坐标
+            cy = max_b.cy()  # 色块中心Y坐标
+            cw = max_b.w()   # 色块宽度
+            ch = max_b.h()   # 色块高度
+            code = max_b.code()
+
+            img.draw_rectangle(max_b.rect())  # 绘制矩形框
+            img.draw_cross(cx, cy)  # 绘制十字
+            FH = bytearray([0x2C, 0x12, cx, cy, cw, ch, code, 0x5B])
+            uart.write(FH)
+            print(cx, cy, cw, ch)
+
+    else:
+        cx, cy, cw, ch, code = 80, 0, 0, 0, 114
+        FH = bytearray([0x2C, 0x12, cx, cy, cw, ch, code, 0x5B])
+        uart.write(FH)
+
+while True:
+    clock.tick()  # 辅助函数
+    img = sensor.snapshot()  # 获取图像
+
+    roi = (0, exclude_top_rows, img.width(), img.height() - exclude_top_rows)  # 更新roi
+
+    if uart.any():  # 检查是否有数据可读取
+        data = uart.read(1)  # 读取一个字节的数据
+        if data:
+            received_byte = data[0]  # 获取接收到的字节
+
+            if received_byte == 0x48:
+
+                process_image_Ball(img, threshold_01, uart)
+
+            else:
+                process_image_Black(img, black_threshold_01, uart, roi)
+                exclude_top_rows = 30  # 排除顶部30行
+
+    # time.sleep(0.1)  # 可选择性延时，避免过快循环
